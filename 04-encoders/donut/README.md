@@ -20,13 +20,13 @@ YourTool.exe  →  donut  →  raw shellcode  →  inject into any process
 ## Setup
 
 ```bash
-# Install the donut tool (binary, not the Python wrapper)
-# Option A — pip
-pip3 install donut-shellcode
+# go-donut — recommended on Kali ARM (pip donut-shellcode is unreliable on ARM)
+sudo apt install golang-go
+go install github.com/Binject/go-donut@latest
+echo 'export PATH=$PATH:~/go/bin' >> ~/.zshrc && source ~/.zshrc
 
-# Option B — compile from source
-git clone https://github.com/TheWover/donut
-cd donut && make
+# Verify
+go-donut --help
 ```
 
 ---
@@ -35,16 +35,16 @@ cd donut && make
 
 ```bash
 # Basic — convert a .NET exe to shellcode
-python3 donut.py -f YourTool.exe -o shellcode.bin
+go-donut --in YourTool.exe --out shellcode.bin
 
 # With arguments passed to the assembly
-python3 donut.py -f YourTool.exe -p "arg1 arg2" -o shellcode.bin
+go-donut --in YourTool.exe --params "arg1 arg2" --out shellcode.bin
 
 # Convert a .NET DLL + call a specific method
-python3 donut.py -f YourTool.dll -c Namespace.Class -m MethodName -o shellcode.bin
+go-donut --in YourTool.dll --class Namespace.Class --method MethodName --out shellcode.bin
 
-# Or use the donut binary directly
-donut -f YourTool.exe -o shellcode.bin
+# Force x64 architecture (default is usually x64, but explicit is safer)
+go-donut --arch x64 --in YourTool.exe --out shellcode.bin
 ```
 
 **Then inject the shellcode** using any loader from `03-loaders/`:
@@ -58,6 +58,6 @@ python3 04-encoders/xor/xor_encoder.py shellcode.bin 0xfa xor --format csharp
 
 ## Notes
 
-- `donut.py` in this repo is currently a **placeholder wrapper** — install the standalone `donut` tool and use it directly if the wrapper doesn't work.
+- Use `go-donut` on Kali ARM — the pip `donut-shellcode` package has ARM build issues.
 - Donut-generated shellcode loads the .NET CLR into the target process — works even in native (non-.NET) processes.
 - Combine with `process-injection/` or `sections-injection/` for fileless .NET tool execution.

